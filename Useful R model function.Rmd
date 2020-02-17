@@ -1,0 +1,764 @@
+---
+title: "R-functions"
+author: "Cijun Sun"
+date: "03/13/2019"
+output:
+  prettydoc::html_pretty:
+  theme: cayman
+highlight: github
+---
+
+```{r setup, include=FALSE}
+set.seed(72)
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55))
+```
+
+```{r libraries, echo = FALSE}
+library(data.table)
+library(DT)
+library(caret)
+library(randomForest)
+library(nnet)
+library(class)
+library(e1071)
+library(glmnet)
+library(xgboost)
+library(lubridate)
+library(xgboost)
+library(archdata)
+library(Ckmeans.1d.dp)
+library(dplyr)
+library(plyr)
+```
+
+```{r source_files}
+```
+
+```{r functions}
+create.formula <- function(outcome.name, input.names, input.patterns = NA, all.data.names = NA, return.as = "character") { 
+  variable.names.from.patterns <- c()
+  if (!is.na(input.patterns[1]) & !is.na(all.data.names[1])) {
+    pattern <- paste(input.patterns, collapse = "|")
+    variable.names.from.patterns <- all.data.names[grep(pattern = pattern, x = all.data.names)]
+    }
+  all.input.names <- unique(c(input.names, variable.names.from.patterns))
+  all.input.names <- all.input.names[all.input.names !=
+outcome.name]
+  if (!is.na(all.data.names[1])) {
+    all.input.names <- all.input.names[all.input.names %in% all.data.names]
+    }
+  input.names.delineated <- sprintf("`%s`", all.input.names)
+  the.formula <- sprintf("`%s` ~ %s", outcome.name, paste(input.names.delineated, collapse = " + "))
+  if (return.as == "formula") {
+    return(as.formula(the.formula)) 
+    }
+  if (return.as != "formula") { 
+    return(the.formula)
+  } 
+}
+
+normalize <- function(x){
+  return((x-min(x))/(max(x)-min(x)))
+}
+
+standardize <- function(x){
+  return((x-mean(x))/sd(x))
+}
+
+round.numerics <- function(x, digits){
+  if(is.numeric(x)){
+    x <- round(x = x, digits = digits)
+  }
+  return(x)
+}
+
+```
+
+```{r constants}
+n.values <- c(500, 1000, 2000)
+iterations <- 3
+WeightRow <- 0.25
+WeightTime <- 0.25
+WeightError <- 0.5
+
+label.name = 'label'
+input.names = names(train)[-1] 
+```
+
+```{r generate_samples}
+# dat_n_k: training set at sample size n with kth sample
+
+sampledata.names <- c()
+for (n in n.values) {
+  for (k in (1:iterations)){
+    index <- sample(1:nrow(train),n)
+    dat_name <- paste('dat',n,k,sep = '_')
+    assign(dat_name,train[index,])
+    sampledata.names <- c(sampledata.names,dat_name)
+  }
+}
+```
+
+
+```{r clean_data}
+
+
+# 3. normalized samples
+normalized.sampledata.names <- c()
+for (i in 1:length(sampledata.names)){
+  dat_name_n <- paste(sampledata.names[i],'normalized',sep = '_')
+  assign(dat_name_n,
+         cbind(get(sampledata.names[i])[,1],
+               as.data.frame(lapply(get(sampledata.names[i])[,-1],normalize))))
+  normalized.sampledata.names <- c(normalized.sampledata.names,dat_name_n)
+}
+
+# 4. standardized samples
+standardized.sampledata.names <- c()
+for (i in 1:length(sampledata.names)){
+  dat_name_s <- paste(sampledata.names[i],'standardized',sep = '_')
+  assign(dat_name_s,
+         cbind(get(sampledata.names[i])[,1],
+               as.data.frame(lapply(get(sampledata.names[i])[,-1],standardize))))
+  standardized.sampledata.names <- c(standardized.sampledata.names,dat_name_s)
+}
+```
+
+
+
+### Model 1:  Multinomial Logistic regression
+Suppose Y takes value in \{1,2,...,k\}, then we use a linear model for the log odds against a baseline category (e.g. 1):
+\[ log[\frac{P(Y=i|X)}{P(Y=1|X)}] = \beta_{0,i} + \beta_{1,i} X_1 + \cdots + \beta_{p,i}X_P\] with i from 2 to K. 
+
+Advantages: <br \>
+1. It is robust because it doesn't assume normality and consistent.<br \>
+2. It can also make non-linear approximations since it doesn't assume linearity. <br \>
+3. It doesn't assume the error terms to be normaly distributed. <br \>
+
+Disadvantages: <br \>
+1. It assumes data are independent with each other. If two variables are dependent, logistic regression will overestimate the significance of each variable. However, in this case, the pixels are independent with each other. Therefore, this is not a concern for this dataset.<br \>
+2. The coefficients are unstable when there is collinearity. Furthermore, it affects the convergence of the fitting algorithm. <br \>
+3. When the classes are well seperated, the coefficients become unstable.
+
+
+```{r code_model1_development, eval = TRUE}
+
+library(nnet)
+
+formula.ml = create.formula(outcome.name = label.name, input.names = input.names)
+
+MLR <- function(dat.name){
+  dat <- get(dat.name)
+  
+  Model = 'Multinomial Logistic regression'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+  
+  start = Sys.time()
+  ml.model = multinom(formula.ml,data = dat,maxit = 300,trace=FALSE)
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+  
+  result = predict(ml.model,test[,-1])
+  C = round(1 - mean(result == test[,get(label.name)]),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+```
+
+```{r load_model1}
+ml.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- MLR(sampledata.names[i])
+  ml.result <- rbind(ml.result,result)
+}
+
+
+```
+
+```{r load_model1 normalized, eval=FALSE}
+ml.result.normalized <- data.frame()
+for (i in 1:length(normalized.sampledata.names)){
+  result <- MLR(normalized.sampledata.names[i])
+  ml.result.normalized <- rbind(ml.result.normalized,result)
+}
+ml.result.normalized
+
+colMeans(ml.result.normalized[,4:7])
+```
+
+```{r load_model1 standardized, eval=FALSE}
+ml.result.standardized <- data.frame()
+for (i in 1:length(standardized.sampledata.names)){
+  result <- MLR(standardized.sampledata.names[i])
+  ml.result.standardized <- rbind(ml.result.standardized,result)
+}
+```
+
+
+
+### Model 2: K-Nearest Neighbors
+The second model is K-Nearest Neighbors. KNN is a nonparamtric method. It classifies a point according to majority of points within the neighborhood of itl.
+
+Advantages:<br \>
+1. It is robust to the noisy data since it only cares about the points in the neighborhood. <br \>
+2. The training process is fast. <br \>
+
+Disadvanteges: <br \>
+1. Computational cost is high since it needs to computed the distance between points and the center points. For example, if we pick K=K and there are N samples in total, then the calculation cost is O(N*K). <br \>
+2. It has no assumptions about indepent variables. <br \>
+
+
+```{r code_model2_development, eval = TRUE}
+# input: character
+# data.name the name of sample dataset
+# output: dataframe
+# Model - Model 2
+# Sample size: # of rows in the sample dataset
+# Data: the sample dataset
+# A - proportion of the training rows
+# B - time (min(1,x/60))
+# C - error rate
+# Points - points of the result
+
+
+library(class)
+
+KNN <- function(dat.name, K = 10){
+  dat <- get(dat.name)
+  
+  Model = 'KNN'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+  
+  start = Sys.time()
+  result = knn(dat[,-1],test[,-1],dat[,get(label.name)],k=K)
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+  C = round(1 - mean(result == test[,get(label.name)]),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+
+```
+
+```{r load_model2}
+knn.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- KNN(sampledata.names[i],K=5)
+  knn.result <- rbind(knn.result,result)
+}
+```
+
+```{r load_model2 normalized, eval=FALSE}
+knn.result.normalized <- data.frame()
+for (i in 1:length(normalized.sampledata.names)){
+  result <- KNN(normalized.sampledata.names[i],K=5)
+  knn.result.normalized <- rbind(knn.result.normalized,result)
+}
+knn.result.normalized
+
+colMeans(knn.result.normalized[,4:7])
+```
+
+```{r load_model2 standardized, eval=FALSE}
+knn.result.standardized <- data.frame()
+for (i in 1:length(standardized.sampledata.names)){
+  result <- KNN(standardized.sampledata.names[i],K=5)
+  knn.result.standardized <- rbind(knn.result.standardized,result)
+}
+knn.result.standardized
+
+colMeans(knn.result.standardized[,4:7])
+```
+
+
+
+### Model 3:  Classification Tree
+The third model is classification tree. Decision tree is tree structure algorithm. Each internal node is a test and each brand is the outcome. The terminal node is the classification class.
+
+Advantages: <br \>
+1. It can be used to approximate nonlinear relationship since it doesn't assume normality. <br \>
+2. Data preparation for classification tree is very easy. <br \>
+3. It is easy to interprate to others and easy to understand even people with no background knowledge.<br \>
+
+Disadvantages: <br \>
+1. It is unstable. If there is a small change of the data, it may genereate a totally different tree.<br \>
+2. It is easy to become overfitting.rfit. Overfitting occurs when there is a significant difference between the performance for training data set and validation data set.  <br \>
+
+
+```{r code_model3_development, eval = TRUE}
+library(rpart)
+
+# input: character
+# data.name the name of sample dataset
+# output: dataframe
+# Model - Model 3
+# Sample size: # of rows in the sample dataset
+# Data: the sample dataset
+# A - proportion of the training rows
+# B - time (min(1,x/60))
+# C - error rate
+# Points - points of the result
+
+formula.ct = create.formula(outcome.name = label.name, input.names = input.names)
+
+CT <- function(dat.name,Test=test){
+  dat <- get(dat.name)
+  
+  Model = 'Classification Tree'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+  
+  start = Sys.time()
+  model <- rpart(formula = formula.ct, data = dat, method='class')
+  pred <- predict(object = model, newdata = Test[,-1], type = 'class')
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+  C = round(1 - mean(pred == Test[,get(label.name)]),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+
+```
+
+```{r load_model3}
+ct.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- CT(sampledata.names[i])
+  ct.result <- rbind(ct.result,result)
+}
+```
+
+```{r load_model3 normalized, eval=FALSE}
+ct.result.normalized <- data.frame()
+for (i in 1:length(normalized.sampledata.names)){
+  result <- CT(normalized.sampledata.names[i])
+  ct.result.normalized <- rbind(ct.result.normalized,result)
+}
+ct.result.normalized
+
+colMeans(ct.result.normalized[,4:7])
+```
+
+```{r load_model3 standardized, eval=FALSE}
+ct.result.standardized <- data.frame()
+for (i in 1:length(standardized.sampledata.names)){
+  result <- CT(standardized.sampledata.names[i])
+  ct.result.standardized <- rbind(ct.result.standardized,result)
+}
+```
+
+
+### Model 5: Random Forest
+
+The accuracy of the random forest model increased compared to the classification trees, the increased accuracy is attributed to the bagging of decision trees used to enhance the prediction accuracy of a simpler model. However, the improved accuracy comes at the expense of increased computing resource required to achieve the accuracy.
+
+We choose number of trees to be 100 and 500. The results are similar. Therefore, for this dataset, bagging of 100 trees is enough.
+
+
+```{r code_model5_development, eval = TRUE}
+rf.ml <- function (dat.name, Test = test, ntree = 500) { 
+  dat <- get(dat.name)
+  
+  Model = 'Random Forest with 500 trees'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+  dat$label=factor(dat$label)
+  start = Sys.time()
+  forest = randomForest(label~.,data=dat,n.tree=ntree)
+  pred = predict(forest, newdata=test)
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+  C = round(1 - mean(unlist(pred) == unlist(test[,1])),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+
+```
+
+```{r load_model5}
+rf_result <- data.frame()
+
+for (i in 1:length(sampledata.names)){
+ rf_model <- rf.ml(dat.name = sampledata.names[i])
+ rf_result <- rbind(rf_model, rf_result)
+}
+
+
+
+```
+### Model 5: GBM
+
+GBM  build an ensemble of shallow and weak successive trees with each tree learning and improving on the previous.
+
+Advantage :
+
+* Often provides predictive accuracy that cannot be beat.
+* Lots of flexibility, which can optimize on different loss functions and provides several hyperparameter tuning options that make the function fit very flexible.
+* No data pre-processing required - often works great with categorical and numerical values as is.
+* Handles missing data - imputation not required.
+
+
+Disadvantage:
+
+* GBMs will continue improving to minimize all errors, which can overemphasize outliers and cause overfitting. Must use cross-validation to neutralize.
+* Computationally expensive - GBMs often require many trees (>1000) which can be time and memory exhaustive.
+* The high flexibility results in many parameters that interact and influence heavily the behavior of the approach (number of iterations, tree depth, regularization parameters, etc.). This requires a large grid search during tuning.
+
+
+```{r}
+train_data   <- train[,-1]
+train_label  <- train[,1]
+
+# split test data and make xgb.DMatrix
+test_data  <- test[,-1]
+test_label <- test[,1]
+
+
+GBM <- function(dat.name){
+  dat <- get(dat.name)
+  label <- dat[,1]
+
+  
+  Model = 'GBM'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+  
+  start = Sys.time()
+  gbm.model =  gbm(label~., data = dat[-1], n.trees = 150, distribution = "multinomial")
+
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+
+  predictionMatrix = predict(gbm.model, newdata = test_data, n.trees = 150,type = 'response')
+  p.predictionMatrixT = apply(predictionMatrix, 1, which.max)
+
+ 
+  result = p.predictionMatrixT
+
+  C = round(1 - mean(result == test_label+1),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+
+
+
+gbm.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- GBM(sampledata.names[i])
+  gbm.result  <- rbind(gbm.result ,result)
+}
+gbm.result
+```
+
+
+
+### Model 6: Support Vector Machine
+
+SVM is a creative technique that find a hyperplane that distinctly classifies the data points. SVM produces significant accuracy with less computation power.  
+
+The Regularization parameter (often termed as C parameter) tells the SVM optimization how much you want to avoid misclassifying each training example.
+
+For large values of C, the optimization will choose a smaller-margin hyperplane if that hyperplane does a better job of getting all the training points classified correctly. Conversely, a very small value of C will cause the optimizer to look for a larger-margin separating hyperplane, even if that hyperplane misclassifies more points.
+
+
+```{r code_model7_development, eval = TRUE}
+library(caret)
+svm.ml <- function (dat, test.name=test) { 
+ Data = dat
+ dat.name <- as.data.frame(get(dat))
+ # extract test set 
+ test.set <- test.name[,1]
+ # initialize modela name 
+ Model = 'Support Vector Machine'
+ # Count Sample size
+ `Sample Size` = nrow(dat.name)
+ # cout the numbe of rows 
+ A = round(nrow(dat.name) / nrow(train),4)
+ # initialize time 
+ tic = Sys.time()
+ # run svm 
+ model.svm <- train(label ~., data = dat.name, method = "svmLinear",
+                 preProcess = c("center", "scale"),
+                 tuneLength = 10)
+ # end timer 
+ toc = Sys.time()
+ # predict results 
+ results <- predict(model.svm, test.name[,-1])
+ # Calculate run time 
+ B = round(min(1,as.numeric(toc - tic)/60),4)
+ # calculate accuracy 
+ C = round(1 - mean(results == test.name[,get(label.name)]),4)
+ # calculate points 
+ Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+ return(data.frame(Model,Data, `Sample Size`,A,B,C,Points))
+ }
+```
+
+```{r load_model7}
+svm_result <- data.frame()
+
+for (i in 1:length(sampledata.names)){
+ model <- svm.ml(dat = sampledata.names[i], test.name = test)
+ svm_result <- rbind(model, svm_result)
+}
+
+```
+
+### Model 7: Lasso Regression
+
+The eighth model is Lasso Regression. It is a method which does regulaization and variable selection at the same time. The objective of Lass is to find $\beta$ minimizes 
+\[\frac{1}{N} \sum_{i=1}^{N}(y_i - \beta_0 - x_i^{T}\beta)\] subject to \[ \sum_{j=1}^{p}|\beta_j| \leq t.\]
+The last term restricts the number of parameters we add in the model.
+
+Advantages: <br \>
+1. It has a penalty term which can help us control the number of parameters in the model. <br \>
+2. It can also be used to deal with multicollinearity. <br \>
+
+
+Disadvantages: <br \>
+1. It is not robust which means it may be easily affected by the outliers.<br \>
+
+```{r code_model8_development, eval = TRUE}
+library(glmnet)
+# input: character
+# data.name the name of sample dataset
+# output: dataframe
+# Model - Model 3
+# Sample size: # of rows in the sample dataset
+# Data: the sample dataset
+# A - proportion of the training rows
+# B - time (min(1,x/60))
+# C - error rate
+# Points - points of the result
+
+LR <- function(dat.name){
+  dat <- get(dat.name)
+  
+  Model = 'Lasso Regression'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+ 
+  start = Sys.time()
+  y <- as.factor(unclass(unlist(dat[,get(label.name)])))
+  alpha1.fit <-  glmnet(as.matrix(dat[,-1]),y,alpha=1,family='multinomial')
+  alpha1.pred <- predict(alpha1.fit,newx=as.matrix(test[,-1]),type='class')
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+  
+  test.pred = as.factor(unclass(unlist(test[,get(label.name)])))
+  C = round(1 - mean(alpha1.pred == test.pred),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+```
+
+
+```{r load_model8}
+lr.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- LR(sampledata.names[i])
+  lr.result <- rbind(lr.result,result)
+}
+
+```
+
+
+### Model 8: Ridge Regression
+Ridge Regression is similar with Lasso regression. The only difference between them is the penalty term. For Ridge Regression, the penalty term is the summation of the L2 norm of $\beta$. 
+
+```{r code_model9_development, eval = TRUE}
+RR <- function(dat.name){
+  dat <- get(dat.name)
+  
+  Model = 'Lasso Regression'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+ 
+  start = Sys.time()
+  y <- as.factor(unclass(unlist(dat[,get(label.name)])))
+  alpha1.fit <-  glmnet(as.matrix(dat[,-1]),y,alpha=0,family='multinomial')
+  alpha1.pred <- predict(alpha1.fit,newx=as.matrix(test[,-1]),type='class')
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+  
+  test.pred = as.factor(unclass(unlist(test[,get(label.name)])))
+  C = round(1 - mean(alpha1.pred == test.pred),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+```
+
+```{r load_model9}
+rr.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- RR(sampledata.names[i])
+  rr.result <- rbind(rr.result,result)
+}
+```
+
+### Model 9: XGBoosting
+
+The xgboost R package provides an R API to “Extreme Gradient Boosting”, which is an efficient implementation of gradient boosting framework. I used **xgb.cv** to select the best parameter for my boosting model, which incorporates cross-validation. 
+
+Disadvantage: 
+However, there are some limitations for the my boosting model, which is the running time. To turn my boosting tree to find the best parameter with grid search took a lot of time and the higher “eta” could bring up the accuracy but lower the running time score.
+
+Parameter selection:
+
+
+hyper_grid <- expand.grid(
+  eta = c(.01, .05, .07,.1),
+  max_depth = c( 7,10,15),
+  min_child_weight = c(1, 3, 5, 7),
+  subsample = c(.65, .8, 1), 
+  colsample_bytree = c(.8, .9, 1)                    # a place to dump results
+)
+
+nrow(hyper_grid)
+
+# grid search 
+for(i in 1:nrow(hyper_grid)) {
+  
+  # create parameter list
+  params <- list(
+    eta = hyper_grid$eta[i],
+    max_depth = hyper_grid$max_depth[i],
+    min_child_weight = hyper_grid$min_child_weight[i],
+    subsample = hyper_grid$subsample[i],
+    colsample_bytree = hyper_grid$colsample_bytree[i]
+  )# reproducibility
+  set.seed(123)
+  
+  # train model
+  xgb.tune <- xgb.cv(
+    params = params,
+    data = data.matrix(x_train),
+    label = train$price,
+    eval_metric = "merror",
+    nrounds = 150,
+    num_class = 10,
+    objective = "multi:softprob",  # for regression models
+    verbose = 0,               # silent,
+    early_stopping_rounds = 10 # stop if no improvement for 10 consecutive trees
+  )
+  
+  # add min training error and trees to grid
+  hyper_grid$optimal_trees[i] <- which.min(xgb.tune$evaluation_log$test_rmse_mean)
+  hyper_grid$min_RMSE[i] <- min(xgb.tune$evaluation_log$test_rmse_mean)
+}
+
+hyper_grid %>%
+  dplyr::arrange(min_RMSE) %>%
+  head(10)
+
+
+```{r code_model10_development, eval = TRUE}
+train<- read.csv('MNIST-fashion training set-49.csv')
+test<- read.csv('MNIST-fashion testing set-49.csv')
+
+train$label<- as.numeric(train$label)-1
+test$label<- as.numeric(test$label)-1
+
+sampledata.names <- c()
+for (n in n.values) {
+  for (k in (1:iterations)){
+    index <- sample(1:nrow(train),n)
+    dat_name <- paste('dat',n,k,sep = '_')
+    assign(dat_name,train[index,])
+    sampledata.names <- c(sampledata.names,dat_name)
+  }
+}
+train<- data.matrix(train)
+train_x <- t(train[,-1])
+train_y <- train[,1]
+train_array<- train_x
+dim(train_array) <- c(7,7,1, ncol(train_x))
+
+test<- data.matrix(test)
+test_x <- t(test[,-1])
+test_y <- test[,1]
+test_array<- test_x
+
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "merror",
+                   "num_class" = 10)
+nround    <- 120 # number of XGBoost rounds
+
+train_data   <- train[,-1]
+train_label  <- train[,1]
+train_matrix <- xgb.DMatrix(data = data.matrix(train_data), label = train_label)
+# split test data and make xgb.DMatrix
+test_data  <- test[,-1]
+test_label <- test[,1]
+test_matrix <- xgb.DMatrix(data = data.matrix(test_data), label = test_label)
+
+XGB <- function(dat.name){
+  dat <- get(dat.name)
+  label <- dat[,1]
+  dat_matrix <- xgb.DMatrix(data= data.matrix(dat[,-1]), label = label)
+  
+  Model = 'XGBoosting'
+  `Sample Size` = nrow(dat)
+  Data = dat.name
+  
+  A = round(nrow(dat)/nrow(train),4)
+  
+  start = Sys.time()
+  xgb.model =  xgb.train(params = xgb_params,
+                       data = dat_matrix, 
+                       nrounds = 200)
+
+  end = Sys.time()
+  B = round(min(1, as.numeric(end - start,units='secs')/60),4)
+
+  xgb_val_preds = predict(xgb.model, newdata = test_matrix)
+
+  xgb_val_out = matrix(xgb_val_preds, nrow = 10, ncol = length(xgb_val_preds) / 10) %>% 
+               t() %>%
+               data.frame() %>%
+               mutate(max = max.col(., ties.method = 'last'), label = test_label + 1) 
+  result = xgb_val_out$max
+
+  C = round(1 - mean(result == test_label+1),4)
+  
+  Points = round(WeightRow*A + WeightTime*B + WeightError*C,4)
+  
+  return(data.frame(Model,`Sample Size`,Data, A,B,C,Points))
+}
+
+```
+
+```{r load_model10}
+xgb.result <- data.frame()
+for (i in 1:length(sampledata.names)){
+  result <- XGB(sampledata.names[i])
+  xgb.result  <- rbind(xgb.result ,result)
+}
+
+```
+
